@@ -60,8 +60,8 @@ def main():
 
     # --- IDENTIFICACIÓN DEL TIMELAPSE ---
     mission  = "ISS067"
-    start_id = 366800
-    end_id   = 366816
+    start_id = 363880
+    end_id   = 364594
 
     # Carpeta base del experimento, estilo: ISS053-E-462550-462560
     base_dir = Path(f"{mission}-E-{start_id}-{end_id}")
@@ -112,7 +112,7 @@ def main():
     orientation_mode = "forward"
 
     # Paso temporal del timelapse simulado
-    delta = 2.0 / 3.0
+    delta = None
 
     # Offsets temporales
     time_offset_seconds = 0.0
@@ -194,6 +194,34 @@ def main():
     print("Rango temporal (tras offset):")
     print(f"  start_dt = {start_dt}")
     print(f"  end_dt   = {end_dt}")
+    
+     # ============================================================
+    # 3.1 CALCULAR DELTA AUTOMÁTICAMENTE
+    # ============================================================
+
+    n_images = len(img_files)
+    delta = (end_dt - start_dt).total_seconds() / (n_images - 1)
+
+    if delta <= 0:
+        raise RuntimeError(
+            f"Delta temporal inválido: {delta} s. "
+            "Revisa el orden de las imágenes y los EXIF."
+        )
+
+    expected_count = end_id - start_id + 1
+    if n_images != expected_count:
+        print(
+            f"⚠️ Aviso: se esperaban {expected_count} imágenes por rango "
+            f"[{start_id}, {end_id}], pero hay {n_images} en {pics_dir}."
+        )
+        print(
+            "   El delta se calculará con las imágenes realmente presentes. "
+            "Si faltan imágenes intermedias, puede haber desfase temporal."
+        )
+
+    print("Paso temporal automático:")
+    print(f"  n_images = {n_images}")
+    print(f"  delta    = {delta:.6f} s")
 
     # ============================================================
     # 4. (OPCIONAL) BÚSQUEDA DE YAW/PITCH CON angle_search.py
