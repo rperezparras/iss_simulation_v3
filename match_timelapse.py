@@ -200,10 +200,51 @@ def orb_fallback_matches(img0_bgr, img1_bgr, max_matches=2000):
     return pts0_in, pts1_in
 
 
-def apply_polynomial_transform(matches_src, matches_dst, grid_points, order=2):
+def normalize_points(points: np.ndarray, width: int, height: int) -> np.ndarray:
+    points = np.asarray(points, dtype=np.float64)
+    out = np.empty_like(points, dtype=np.float64)
+    out[:, 0] = 2.0 * (points[:, 0] / max(width - 1, 1)) - 1.0
+    out[:, 1] = 2.0 * (points[:, 1] / max(height - 1, 1)) - 1.0
+    return out
+
+
+def denormalize_points(points_n: np.ndarray, width: int, height: int) -> np.ndarray:
+    points_n = np.asarray(points_n, dtype=np.float64)
+    out = np.empty_like(points_n, dtype=np.float64)
+    out[:, 0] = 0.5 * (points_n[:, 0] + 1.0) * max(width - 1, 1)
+    out[:, 1] = 0.5 * (points_n[:, 1] + 1.0) * max(height - 1, 1)
+    return out
+
+
+def apply_polynomial_transform(
+    matches_src,
+    matches_dst,
+    grid_points,
+    src_width,
+    src_height,
+    dst_width,
+    dst_height,
+    order=2,
+):
+    src_n = normalize_points(matches_src, src_width, src_height)
+    dst_n = normalize_points(matches_dst, dst_width, dst_height)
+    grid_n = normalize_points(grid_points, src_width, src_height)
+
     poly_transform = PolynomialTransform()
-    poly_transform.estimate(matches_src, matches_dst)
-    transformed_points = poly_transform(grid_points)
+    ok = poly_transform.estimate(src_n, dst_n, order=order)
+
+    if not ok:
+        return None, None
+
+    transformed_n = poly_transform(grid_n)
+
+    # Aquí vuelves a coordenadas píxel simuladas
+    transformed_points = denormalize_points(
+        transformed_n,
+        dst_width,
+        dst_height,
+    )
+
     return poly_transform, transformed_points
 
 
@@ -369,6 +410,35 @@ def main(args: argparse.Namespace | None = None):
         mkpts0 = np.asarray(mkpts0, dtype=np.float32)
         mkpts1 = np.asarray(mkpts1, dtype=np.float32)
 
+        # ---- Filtrado RANSAC también para matches del matcher principal
+        H, mask = cv2.findHomography(
+            mkpts1.astype(np.float32),  # real
+            mkpts0.astype(np.float32),  # sim
+            cv2.RANSAC,
+            3.0,
+        )
+
+        if mask is None:
+            print(f"⚠️ Frame {idx}: RANSAC falló. No se genera CSV.")
+            continue
+
+        n_before = len(mkpts0)
+
+        inliers = mask.ravel().astype(bool)
+        mkpts0 = mkpts0[inliers]
+        mkpts1 = mkpts1[inliers]
+
+        n_after = len(mkpts0)
+        print(
+            f"Frame {idx}: matches={n_before}, "
+            f"inliers={n_after}, "
+            f"ratio={n_after / max(n_before, 1):.2f}"
+        )
+
+        if len(mkpts0) < args.min_matches:
+            print(f"⚠️ Frame {idx}: pocos inliers tras RANSAC ({len(mkpts0)}). No se genera CSV.")
+            continue
+
         # ---- Grid en real
         real_points = generate_grid_points(w1, h1, step=args.grid_step)
 
@@ -377,8 +447,33 @@ def main(args: argparse.Namespace | None = None):
             matches_src=mkpts1,
             matches_dst=mkpts0,
             grid_points=real_points,
+            src_width=w1,
+            src_height=h1,
+            dst_width=w0,
+            dst_height=h0,
             order=2,
         )
+
+        if poly_transform is None or transformed_grid_points is None:
+            print(f"⚠️ Frame {idx}: falló el ajuste polinómico. No se genera CSV.")
+            continue
+
+        inside = (
+            (transformed_grid_points[:, 0] >= 0) &
+            (transformed_grid_points[:, 0] < w0) &
+            (transformed_grid_points[:, 1] >= 0) &
+            (transformed_grid_points[:, 1] < h0)
+        )
+
+        real_points_valid = real_points[inside]
+        transformed_grid_points_valid = transformed_grid_points[inside]
+
+        if len(real_points_valid) < args.min_matches:
+            print(
+                f"⚠️ Frame {idx}: pocos puntos válidos tras transformar "
+                f"({len(real_points_valid)}). No se genera CSV."
+            )
+            continue
 
         # ---- Guardar CSV
         csv_filename = f"transformed_coordinates_{os.path.splitext(img0_file)[0]}.csv"
@@ -387,7 +482,8 @@ def main(args: argparse.Namespace | None = None):
         with open(csv_path, mode="w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["sim_x", "sim_y", "real_x", "real_y"])
-            for pt0, pt1 in zip(transformed_grid_points, real_points):
+
+            for pt0, pt1 in zip(transformed_grid_points_valid, real_points_valid):
                 sim_x = float(pt0[0])
                 sim_y = float(invert_y_coordinate(pt0[1], h0))
                 real_x = float(pt1[0])
